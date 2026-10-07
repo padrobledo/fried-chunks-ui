@@ -7,9 +7,14 @@ docker compose --env-file .env.local up --build
 ```
 
 La página `/` queda disponible en `http://localhost:3000`. Lee el catálogo de
-la API, crea el checkout desde cada producto y maneja las rutas
-`/payment/success`, `/payment/failure` y `/payment/pending`. Si el usuario vuelve
-a `/` sin pagar, muestra el checkout como no completado.
+la API y ofrece navegación con React Router por `/menu`, `/menu/:productId`,
+`/cart`, `/orders` y `/orders/:orderId`. El carrito y los identificadores de los
+pedidos realizados desde el dispositivo se conservan en IndexedDB; precios,
+disponibilidad y estados siempre se confirman contra la API.
+
+Las rutas `/payment/success`, `/payment/failure` y `/payment/pending` procesan el
+regreso desde Mercado Pago. Si el usuario vuelve sin pagar, el checkout se
+muestra como no completado y permanece visible en Mis pedidos.
 
 La imagen final usa Nginx y lee `PORT` al iniciar. Railway puede inyectar su
 puerto dinámico sin ejecutar Node en producción.
