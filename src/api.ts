@@ -47,3 +47,9 @@ export async function abandonOrder(orderId: string): Promise<OrderStatus> {
     method: "POST",
   }));
 }
+
+export async function cancelOrder(orderId: string): Promise<OrderStatus> {
+  return jsonResponse<OrderStatus>(await apiFetch(`/orders/${orderId}/cancel`, {
+    method: "POST",
+  }));
+}
