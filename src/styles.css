@@ -18,6 +18,7 @@
 html { background: #17130d; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; }
 h1, h2, h3, p { margin-top: 0; }
 
@@ -263,6 +264,14 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .order-detail-item small { color: var(--muted); font-size: .72rem; }
 .order-detail-item > strong { white-space: nowrap; }
 .order-detail-total { display: flex; justify-content: space-between; gap: 1rem; margin-top: .45rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 1.1rem; }
+.order-detail-page .back-link { margin-bottom: .5rem; }
+.result-card--order-detail { margin-top: .15rem; padding-top: 1.5rem; }
+.result-card--order-detail h1 { margin-top: .55rem; font-size: clamp(1.65rem, 7vw, 2.4rem); line-height: .96; letter-spacing: -.045em; }
+.result-card--order-detail .order-detail-item { padding: .45rem 0; }
+.result-card--order-detail .order-detail-item small { margin: .25rem 0 0; }
+.order-detail-actions { display: grid; gap: .65rem; margin-top: 1rem; }
+.order-detail-actions button { width: 100%; }
+.order-detail-actions .retry-error { margin: 0; }
 
 .empty-state { width: 100%; max-width: 32rem; margin: 10vh auto 0; padding: 2rem 1.4rem; border: 1px dashed rgb(244 185 66 / 35%); border-radius: 1.5rem; text-align: center; }
 .empty-state > span { display: inline-grid; min-width: 3.5rem; height: 3.5rem; place-items: center; border-radius: 50%; color: var(--accent); background: rgb(244 185 66 / 10%); font-size: 1.25rem; font-weight: 900; }
@@ -297,6 +306,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .result-card { width: 100%; max-width: 34rem; margin: 8vh auto 0; padding: 2rem 1.5rem; overflow: hidden; border: 1px solid var(--line); border-radius: 1.5rem; background: rgb(35 28 18 / 94%); box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 30%); text-align: center; }
 .result-card--embedded { margin-top: 1rem; }
 .result-card h1 { font-size: clamp(2.15rem, 10vw, 3.5rem); }
+.result-card h1.result-title--compact { font-size: clamp(1.5rem, 6vw, 2rem); line-height: 1; letter-spacing: -.035em; }
 .result-card p { max-width: 28rem; margin: 1rem auto; color: var(--muted); line-height: 1.6; }
 .result-card small { display: block; margin: .7rem 0 1.5rem; color: #9f927d; }
 .result-amount { display: block; font-size: 1.7rem; }

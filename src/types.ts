@@ -41,6 +41,7 @@ export type OrderItem = {
 
 export type OrderStatus = {
   order_id: string;
+  created_at: string;
   status: string;
   fulfillment_status: FulfillmentStatus | null;
   payment_status: string;

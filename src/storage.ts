@@ -48,9 +48,12 @@ export async function rememberOrder(orderId: string): Promise<void> {
 export async function saveOrderStatus(status: OrderStatus): Promise<void> {
   const database = await databasePromise;
   const existing = await database.get("orders", status.order_id);
+  const serverCreatedAt = Date.parse(status.created_at);
   await database.put("orders", {
     order_id: status.order_id,
-    created_at: existing?.created_at ?? Date.now(),
+    created_at: Number.isNaN(serverCreatedAt)
+      ? existing?.created_at ?? Date.now()
+      : serverCreatedAt,
     last_status: status,
   });
 }

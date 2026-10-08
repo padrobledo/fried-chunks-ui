@@ -13,7 +13,7 @@ import {
   useSearchParams,
 } from "react-router";
 
-import { abandonOrder, createCartCheckout, fetchOrderStatus, retryOrder } from "./api";
+import { abandonOrder, createCartCheckout, fetchOrderStatus, fetchOrderStatuses, retryOrder } from "./api";
 import { ShopProvider, useShop } from "./ShopContext";
 import { loadKnownOrders, rememberOrder, saveOrderStatus } from "./storage";
 import type { FulfillmentStatus, KnownOrder, OrderStatus, Product, ProductCategory } from "./types";
@@ -26,6 +26,29 @@ const terminalStatuses = new Set([
   "paid", "failed", "cancelled", "expired", "refunded", "partially_refunded", "disputed",
 ]);
 const completedFulfillmentStatuses = new Set<FulfillmentStatus>(["delivered", "picked_up"]);
+
+function usePageReturn(onReturn: () => void) {
+  const onReturnRef = useRef(onReturn);
+  useEffect(() => { onReturnRef.current = onReturn; }, [onReturn]);
+  useEffect(() => {
+    let lastHandledAt = 0;
+    const handleReturn = () => {
+      const now = Date.now();
+      if (now - lastHandledAt < 500) return;
+      lastHandledAt = now;
+      onReturnRef.current();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") handleReturn();
+    };
+    window.addEventListener("pageshow", handleReturn);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("pageshow", handleReturn);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+}
 const fulfillmentLabels: Record<FulfillmentStatus, string> = {
   received: "Recibido",
   preparing: "En preparación",
@@ -469,30 +492,42 @@ function OrdersPage() {
     const sequence = ++loadSequence.current;
     setLoading(true);
     const checkoutOrderId = localStorage.getItem(storedOrderKey);
-    if (checkoutOrderId) await rememberOrder(checkoutOrderId);
-    const known = await loadKnownOrders();
-    const refreshed = await Promise.all(known.map(async (order) => {
-      try {
-        let status = await fetchOrderStatus(order.order_id);
-        const returnedFromCheckoutWithoutPayment = (
-          order.order_id === checkoutOrderId
-          && status.payment_attempt_status === null
-          && status.status === "awaiting_payment"
-          && status.payment_status === "created"
-          && status.checkout_state !== "abandoned"
-        );
-        if (returnedFromCheckoutWithoutPayment) status = await abandonOrder(order.order_id);
-        await saveOrderStatus(status);
-        return { ...order, last_status: status };
-      } catch { return order; }
-    }));
-    if (sequence !== loadSequence.current) return;
-    const checkoutOrder = refreshed.find((order) => order.order_id === checkoutOrderId);
-    if (
-      checkoutOrder?.last_status
-      && (terminalStatuses.has(checkoutOrder.last_status.status) || checkoutOrder.last_status.checkout_state === "abandoned")
-    ) localStorage.removeItem(storedOrderKey);
-    setOrders(refreshed); setLoading(false);
+    try {
+      if (checkoutOrderId) await rememberOrder(checkoutOrderId);
+      let statuses = await fetchOrderStatuses();
+      const checkoutStatusIndex = statuses.findIndex((status) => status.order_id === checkoutOrderId);
+      const checkoutStatus = statuses[checkoutStatusIndex];
+      const returnedFromCheckoutWithoutPayment = Boolean(
+        checkoutStatus
+        && checkoutStatus.payment_attempt_status === null
+        && checkoutStatus.status === "awaiting_payment"
+        && checkoutStatus.payment_status === "created"
+        && checkoutStatus.checkout_state !== "abandoned"
+      );
+      if (returnedFromCheckoutWithoutPayment && checkoutStatus) {
+        const abandoned = await abandonOrder(checkoutStatus.order_id);
+        statuses = statuses.map((status, index) => index === checkoutStatusIndex ? abandoned : status);
+      }
+      await Promise.all(statuses.map(saveOrderStatus));
+      const refreshed = statuses
+        .map((status) => ({
+          order_id: status.order_id,
+          created_at: Date.parse(status.created_at),
+          last_status: status,
+        }))
+        .sort((left, right) => right.created_at - left.created_at);
+      if (sequence !== loadSequence.current) return;
+      const checkoutOrder = refreshed.find((order) => order.order_id === checkoutOrderId);
+      if (
+        checkoutOrder?.last_status
+        && (terminalStatuses.has(checkoutOrder.last_status.status) || checkoutOrder.last_status.checkout_state === "abandoned")
+      ) localStorage.removeItem(storedOrderKey);
+      setOrders(refreshed);
+    } catch {
+      if (sequence === loadSequence.current) setOrders(await loadKnownOrders());
+    } finally {
+      if (sequence === loadSequence.current) setLoading(false);
+    }
   }, []);
   useEffect(() => {
     function refreshOrders() {
@@ -619,6 +654,8 @@ function OrderDetailPage() {
   const { orderId } = useParams();
   const [status, setStatus] = useState<OrderStatus | null>(null);
   const [error, setError] = useState("");
+  const [retryError, setRetryError] = useState("");
+  const [isRetrying, setIsRetrying] = useState(false);
   const loadStatus = useCallback(async () => {
     if (!orderId) return;
     try {
@@ -634,22 +671,43 @@ function OrderDetailPage() {
     const timer = window.setInterval(() => void loadStatus(), 10000);
     return () => window.clearInterval(timer);
   }, [loadStatus, status]);
+  usePageReturn(() => {
+    setIsRetrying(false);
+    void loadStatus();
+  });
   const content = status ? statusContent(status) : null;
+  const isIncompletePayment = status ? returnedWithoutPayment(status, "") : false;
+  async function finishPayment() {
+    if (!status) return;
+    setIsRetrying(true); setRetryError("");
+    try {
+      const checkout = await retryOrder(status.order_id);
+      await rememberOrder(checkout.order_id);
+      localStorage.setItem(storedOrderKey, checkout.order_id);
+      window.location.assign(checkout.checkout_url);
+    } catch {
+      setRetryError("No pudimos abrir Mercado Pago. Intentá nuevamente.");
+      setIsRetrying(false);
+    }
+  }
   return (
-    <main className="page"><div className="shell shell--narrow">
+    <main className="page order-detail-page"><div className="shell shell--narrow">
       <Link className="back-link" to="/orders">← Mis pedidos</Link>
-      <section className="result-card result-card--embedded" aria-live="polite">
+      <section className="result-card result-card--embedded result-card--order-detail" aria-live="polite">
         {!content && !error && <p className="loading">Actualizando pedido…</p>}
         {error && <div className="notice notice--error">{error}</div>}
         {content && status && <>
-          <div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div>
           <span className="eyebrow">Pedido {shortOrderId(status.order_id)}</span>
-          <h1>{content.title}</h1>
-          <p>{content.text}</p>
-          <div className="order-state-list">
-            <div><span>Estado del pago</span><strong>{orderStatusLabel(status)}</strong></div>
+          <h1 className={isIncompletePayment ? "result-title--compact" : undefined}>{content.title}</h1>
+          {!status.can_retry && <p>{content.text}</p>}
+          {!isIncompletePayment && <div className="order-state-list">
+            {!status.can_retry && <div><span>Estado del pago</span><strong>{orderStatusLabel(status)}</strong></div>}
             <div><span>Estado del pedido</span><strong>{fulfillmentStatusLabel(status)}</strong></div>
-          </div>
+          </div>}
+          {status.can_retry && <div className="order-detail-actions">
+            {retryError && <p className="retry-error" role="alert">{retryError}</p>}
+            <button type="button" onClick={() => void finishPayment()} disabled={isRetrying}>{isRetrying ? "Abriendo Mercado Pago…" : "Terminar pago"}</button>
+          </div>}
           <div className="order-detail-items">
             <h2>Tu pedido</h2>
             {status.items.map((item, index) => <div className="order-detail-item" key={item.product_id ?? `${item.product_name}-${index}`}>
@@ -688,6 +746,10 @@ function PaymentResultPage() {
     const timer = window.setInterval(() => void loadStatus(), 4000);
     return () => window.clearInterval(timer);
   }, [loadStatus, status]);
+  usePageReturn(() => {
+    setIsRetrying(false);
+    void loadStatus();
+  });
   async function retryPayment() {
     if (!orderId) return;
     setIsRetrying(true); setRetryError("");
@@ -699,11 +761,12 @@ function PaymentResultPage() {
     } catch { setRetryError("No pudimos iniciar un nuevo intento. Volvé a probar en unos segundos."); setIsRetrying(false); }
   }
   const content = status ? statusContent(status, returnKind) : null;
+  const isIncompletePayment = status ? returnedWithoutPayment(status, returnKind) : false;
   return (
     <main className="payment-page"><section className="result-card" aria-live="polite">
       {!content && !error && <p className="loading">Verificando el pago…</p>}
       {error && <><div className="result-icon result-icon--error">!</div><h1>No pudimos verificarlo</h1><p>{error}</p><button type="button" onClick={() => void loadStatus()}>Reintentar</button></>}
-      {!error && content && status && <><div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div><span className="eyebrow">Estado del pedido</span><h1>{content.title}</h1><p>{content.text}</p><strong className="result-amount">{formatPrice(status.total_amount, status.currency)}</strong><small>Pedido {shortOrderId(status.order_id)}</small>{retryError && <p className="retry-error" role="alert">{retryError}</p>}<div className="result-actions">{status.can_retry && <button type="button" onClick={() => void retryPayment()} disabled={isRetrying}>{isRetrying ? "Abriendo Mercado Pago…" : "Pagar con otra tarjeta"}</button>}<Link className="button-link button-link--secondary" to="/orders">Ver mis pedidos</Link><Link className="text-link" to="/menu">Volver al menú</Link></div></>}
+      {!error && content && status && <>{!isIncompletePayment && <div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div>}<span className="eyebrow">Estado del pedido</span><h1 className={isIncompletePayment ? "result-title--compact" : undefined}>{content.title}</h1><p>{content.text}</p><strong className="result-amount">{formatPrice(status.total_amount, status.currency)}</strong><small>Pedido {shortOrderId(status.order_id)}</small>{retryError && <p className="retry-error" role="alert">{retryError}</p>}<div className="result-actions">{status.can_retry && <button type="button" onClick={() => void retryPayment()} disabled={isRetrying}>{isRetrying ? "Abriendo Mercado Pago…" : "Pagar con otra tarjeta"}</button>}<Link className="button-link button-link--secondary" to="/orders">Ver mis pedidos</Link><Link className="text-link" to="/menu">Volver al menú</Link></div></>}
     </section></main>
   );
 }
