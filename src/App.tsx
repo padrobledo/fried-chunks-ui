@@ -19,6 +19,7 @@ import { loadKnownOrders, rememberOrder, saveOrderStatus } from "./storage";
 import type { FulfillmentStatus, KnownOrder, OrderStatus, Product, ProductCategory } from "./types";
 
 const storedOrderKey = "fried_chunks_order_id";
+const revealIncompleteOrderKey = "fried_chunks_reveal_incomplete_order";
 const menuScrollKey = "fried_chunks_menu_scroll";
 const menuExitEvent = "fried-chunks:menu-exit";
 const menuTransitionMs = 220;
@@ -468,6 +469,13 @@ function fulfillmentStatusLabel(status: OrderStatus) {
   return status.status === "paid" ? "Recibido" : "Esperando confirmación del pago";
 }
 
+function isIncompleteOrderStatus(status?: OrderStatus) {
+  return Boolean(
+    status?.can_retry
+    && !["cancelled", "expired"].includes(status.status),
+  );
+}
+
 function OrderCard({ order }: { order: KnownOrder }) {
   return (
     <Link className="order-card" to={`/orders/${order.order_id}`}>
@@ -492,6 +500,7 @@ function OrdersPage() {
     const sequence = ++loadSequence.current;
     setLoading(true);
     const checkoutOrderId = localStorage.getItem(storedOrderKey);
+    const revealIncompleteOrderId = localStorage.getItem(revealIncompleteOrderKey);
     try {
       if (checkoutOrderId) await rememberOrder(checkoutOrderId);
       let statuses = await fetchOrderStatuses();
@@ -518,6 +527,14 @@ function OrdersPage() {
         .sort((left, right) => right.created_at - left.created_at);
       if (sequence !== loadSequence.current) return;
       const checkoutOrder = refreshed.find((order) => order.order_id === checkoutOrderId);
+      const revealIncompleteOrder = refreshed.find(
+        (order) => order.order_id === revealIncompleteOrderId,
+      );
+      if (
+        isIncompleteOrderStatus(checkoutOrder?.last_status)
+        || isIncompleteOrderStatus(revealIncompleteOrder?.last_status)
+      ) setIncompleteOrdersOpen(true);
+      if (revealIncompleteOrder) localStorage.removeItem(revealIncompleteOrderKey);
       if (
         checkoutOrder?.last_status
         && (terminalStatuses.has(checkoutOrder.last_status.status) || checkoutOrder.last_status.checkout_state === "abandoned")
@@ -549,8 +566,7 @@ function OrdersPage() {
     && (!status.fulfillment_status || !completedFulfillmentStatuses.has(status.fulfillment_status))
   ));
   const incompleteOrders = orders.filter(({ last_status: status }) => (
-    status?.can_retry
-    && !["cancelled", "expired"].includes(status.status)
+    isIncompleteOrderStatus(status)
   ));
   const previousOrders = orders.filter((order) => (
     !activeOrders.includes(order)
@@ -737,7 +753,12 @@ function PaymentResultPage() {
       let current = await fetchOrderStatus(orderId);
       if (returnedWithoutPayment(current, returnKind) && current.checkout_state !== "abandoned") current = await abandonOrder(orderId);
       await saveOrderStatus(current); setError(""); setStatus(current);
-      if (terminalStatuses.has(current.status) || current.checkout_state === "abandoned") localStorage.removeItem(storedOrderKey);
+      if (isIncompleteOrderStatus(current)) {
+        localStorage.setItem(revealIncompleteOrderKey, current.order_id);
+      }
+      if (terminalStatuses.has(current.status) || current.checkout_state === "abandoned") {
+        localStorage.removeItem(storedOrderKey);
+      }
     } catch { setError("No pudimos consultar el estado del pago. Intentá nuevamente."); }
   }, [orderId, returnKind]);
   useEffect(() => { void loadStatus(); }, [loadStatus]);
