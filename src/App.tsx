@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 import {
   BrowserRouter,
   Link,
+  Navigate,
   NavLink,
   Outlet,
   Route,
@@ -15,12 +16,32 @@ import {
 import { abandonOrder, createCartCheckout, fetchOrderStatus, retryOrder } from "./api";
 import { ShopProvider, useShop } from "./ShopContext";
 import { loadKnownOrders, rememberOrder, saveOrderStatus } from "./storage";
-import type { KnownOrder, OrderStatus, Product } from "./types";
+import type { FulfillmentStatus, KnownOrder, OrderStatus, Product, ProductCategory } from "./types";
 
 const storedOrderKey = "fried_chunks_order_id";
+const menuScrollKey = "fried_chunks_menu_scroll";
+const menuExitEvent = "fried-chunks:menu-exit";
+const menuTransitionMs = 220;
 const terminalStatuses = new Set([
   "paid", "failed", "cancelled", "expired", "refunded", "partially_refunded", "disputed",
 ]);
+const completedFulfillmentStatuses = new Set<FulfillmentStatus>(["delivered", "picked_up"]);
+const fulfillmentLabels: Record<FulfillmentStatus, string> = {
+  received: "Recibido",
+  preparing: "En preparación",
+  ready_to_ship: "Listo para enviar",
+  on_the_way: "En camino",
+  delivered: "Entregado",
+  delayed_kitchen: "Demorado en cocina",
+  delayed_delivery: "Demorado en camino",
+  picked_up: "Retirado",
+};
+const menuCategories: { id: ProductCategory; label: string }[] = [
+  { id: "chunks", label: "Chunks" },
+  { id: "fries", label: "Papas" },
+  { id: "beverages", label: "Bebidas" },
+  { id: "combos", label: "Combos" },
+];
 
 function formatPrice(value: string | number, currency = "ARS") {
   return new Intl.NumberFormat("es-AR", {
@@ -83,32 +104,51 @@ function ProductArtwork({ product, large = false }: { product: Product; large?: 
 }
 
 function BottomNavigation() {
-  const { cartCount } = useShop();
+  const { cartCount, cartNotice } = useShop();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const navigationTimer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (navigationTimer.current !== null) window.clearTimeout(navigationTimer.current);
+  }, []);
+
+  function changeTab(event: MouseEvent<HTMLAnchorElement>, destination: "/" | "/orders") {
+    if (
+      location.pathname !== "/menu"
+      || event.button !== 0
+      || event.metaKey
+      || event.ctrlKey
+      || event.shiftKey
+      || event.altKey
+    ) return;
+    event.preventDefault();
+    window.dispatchEvent(new Event(menuExitEvent));
+    const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : menuTransitionMs;
+    if (navigationTimer.current !== null) window.clearTimeout(navigationTimer.current);
+    navigationTimer.current = window.setTimeout(() => {
+      navigationTimer.current = null;
+      navigate(destination);
+    }, delay);
+  }
+
   return (
     <nav className="bottom-nav" aria-label="Navegación principal">
-      <NavLink to="/" end><span aria-hidden="true">⌂</span>Inicio</NavLink>
+      <NavLink to="/" end onClick={(event) => changeTab(event, "/")}><span aria-hidden="true">⌂</span>Inicio</NavLink>
       <NavLink to="/menu"><span aria-hidden="true">☰</span>Menú</NavLink>
-      <NavLink to="/orders"><span aria-hidden="true">▤</span>Pedidos</NavLink>
-      <NavLink to="/cart" className="cart-nav-link">
-        <span aria-hidden="true">▱</span>Carrito{cartCount > 0 && <b>{cartCount}</b>}
+      <NavLink to="/orders" onClick={(event) => changeTab(event, "/orders")} className={`orders-nav-link${cartNotice ? " orders-nav-link--attention" : ""}`}>
+        <span aria-hidden="true">▤</span>Pedidos{cartCount > 0 && <b>{cartCount}</b>}
       </NavLink>
     </nav>
   );
 }
 
 function ShopLayout() {
-  const location = useLocation();
-  const { cartCount, cartTotal } = useShop();
-  const showCartDock = cartCount > 0 && location.pathname !== "/cart";
+  const { cartNotice, dismissCartNotice } = useShop();
   return (
     <div className="app-frame">
       <Outlet />
-      {showCartDock && (
-        <Link className="cart-dock" to="/cart">
-          <span>{cartCount} {cartCount === 1 ? "producto" : "productos"}</span>
-          <strong>Ver carrito · {formatPrice(cartTotal)}</strong>
-        </Link>
-      )}
+      {cartNotice && <button className="order-toast" type="button" onClick={dismissCartNotice} aria-live="polite">{cartNotice}</button>}
       <BottomNavigation />
     </div>
   );
@@ -183,39 +223,112 @@ function HomePage() {
 function MenuPage() {
   const { products, productsLoading, productsError, addToCart } = useShop();
   const [addedProduct, setAddedProduct] = useState<string | null>(null);
+  const [activeCategory, setActiveCategory] = useState<ProductCategory>("chunks");
+  const [subnavLeaving, setSubnavLeaving] = useState(false);
+  const scrollRestored = useRef(false);
+
+  useEffect(() => {
+    function beginSubnavExit() {
+      setSubnavLeaving(true);
+    }
+    window.addEventListener(menuExitEvent, beginSubnavExit);
+    return () => window.removeEventListener(menuExitEvent, beginSubnavExit);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (productsLoading) return;
+    const storedPosition = Number(sessionStorage.getItem(menuScrollKey) ?? 0);
+    window.scrollTo({ top: Number.isFinite(storedPosition) ? storedPosition : 0, behavior: "auto" });
+    scrollRestored.current = true;
+    return () => {
+      if (scrollRestored.current) sessionStorage.setItem(menuScrollKey, String(window.scrollY));
+    };
+  }, [productsLoading]);
+
+  useEffect(() => {
+    if (productsLoading) return;
+    function rememberMenuPosition() {
+      if (scrollRestored.current) sessionStorage.setItem(menuScrollKey, String(window.scrollY));
+    }
+    window.addEventListener("scroll", rememberMenuPosition, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", rememberMenuPosition);
+    };
+  }, [productsLoading]);
+
+  useEffect(() => {
+    if (productsLoading) return;
+    function updateActiveCategory() {
+      const atPageBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+      if (atPageBottom) {
+        setActiveCategory(menuCategories[menuCategories.length - 1].id);
+        return;
+      }
+      const activationLine = Math.min(window.innerHeight * .3, 180);
+      let current = menuCategories[0].id;
+      for (const category of menuCategories) {
+        const section = document.getElementById(`category-${category.id}`);
+        if (section && section.getBoundingClientRect().top <= activationLine) current = category.id;
+      }
+      setActiveCategory(current);
+    }
+    updateActiveCategory();
+    window.addEventListener("scroll", updateActiveCategory, { passive: true });
+    window.addEventListener("resize", updateActiveCategory);
+    return () => {
+      window.removeEventListener("scroll", updateActiveCategory);
+      window.removeEventListener("resize", updateActiveCategory);
+    };
+  }, [productsLoading, products.length]);
+  function selectCategory(category: ProductCategory) {
+    setActiveCategory(category);
+    document.getElementById(`category-${category}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   function quickAdd(product: Product) {
     addToCart(product);
     setAddedProduct(product.product_id);
     window.setTimeout(() => setAddedProduct(null), 1200);
   }
   return (
-    <main className="page"><div className="shell shell--narrow">
-      <header className="page-header"><span className="eyebrow">Fried Chunks</span><h1>Menú</h1><p>Elegí tus favoritos y armá el pedido a tu manera.</p></header>
-      <div className="category-pills" aria-label="Categorías">
-        <button className="pill pill--active" type="button">Todo</button>
-        <button className="pill" type="button" disabled>Combos</button>
-        <button className="pill" type="button" disabled>Bebidas</button>
-      </div>
+    <main className="page page--menu"><div className="shell shell--narrow">
+      <nav className={`category-subnav${subnavLeaving ? " category-subnav--leaving" : ""}`} aria-label="Categorías">
+        {menuCategories.map((category) => <button
+          className={`category-tab${activeCategory === category.id ? " category-tab--active" : ""}`}
+          type="button"
+          aria-pressed={activeCategory === category.id}
+          onClick={() => selectCategory(category.id)}
+          key={category.id}
+        >{category.label}</button>)}
+      </nav>
       {productsLoading && <p className="loading">Cargando menú…</p>}
       {productsError && <div className="notice notice--error">{productsError}</div>}
-      <section className="menu-list" aria-label="Productos">
-        {products.map((product) => (
-          <article className="menu-card" key={product.product_id}>
-            <Link to={`/menu/${product.product_id}`} className="menu-card__art"><ProductArtwork product={product} /></Link>
-            <div className="menu-card__body">
-              <Link to={`/menu/${product.product_id}`}><h2>{product.product_name}</h2></Link>
-              <p>{product.product_description}</p>
-              <div className="menu-card__footer">
-                <strong>{formatPrice(product.product_price)}</strong>
-                <button className="icon-button" type="button" onClick={() => quickAdd(product)} aria-label={`Agregar ${product.product_name}`}>
-                  {addedProduct === product.product_id ? "✓" : "+"}
-                </button>
-              </div>
+      <div className="menu-categories" aria-label="Productos">
+        {menuCategories.map((category) => {
+          const categoryProducts = products.filter((product) => (product.category ?? "chunks") === category.id);
+          return <section className="menu-category" id={`category-${category.id}`} key={category.id}>
+            <h2>{category.label}</h2>
+            <div className="menu-list">
+              {categoryProducts.map((product) => (
+                <article className="menu-card" key={product.product_id}>
+                  <Link to={`/menu/${product.product_id}`} className="menu-card__art"><ProductArtwork product={product} /></Link>
+                  <div className="menu-card__body">
+                    <Link to={`/menu/${product.product_id}`}><h3>{product.product_name}</h3></Link>
+                    <p>{product.product_description}</p>
+                    <div className="menu-card__footer">
+                      <strong>{formatPrice(product.product_price)}</strong>
+                      <button className="icon-button" type="button" onClick={() => quickAdd(product)} aria-label={`Agregar ${product.product_name}`}>
+                        {addedProduct === product.product_id ? "✓" : "+"}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+              {!productsLoading && !categoryProducts.length && <p className="category-empty">Próximamente.</p>}
             </div>
-          </article>
-        ))}
+          </section>;
+        })}
         {!productsLoading && !products.length && !productsError && <p>No hay productos disponibles.</p>}
-      </section>
+      </div>
     </div></main>
   );
 }
@@ -228,16 +341,16 @@ function ProductDetailPage() {
   const product = products.find((item) => item.product_id === productId);
   if (productsLoading) return <main className="page"><p className="loading">Cargando producto…</p></main>;
   if (!product) return <main className="page"><div className="empty-state"><span>?</span><h1>No encontramos el producto</h1><Link className="button-link" to="/menu">Volver al menú</Link></div></main>;
-  function addAndContinue() {
+  function addAndGo(destination: "/menu" | "/orders#current") {
     addToCart(product!, quantity);
-    navigate("/cart");
+    navigate(destination);
   }
   return (
     <main className="page product-detail-page"><div className="shell shell--detail">
       <Link className="back-link" to="/menu">← Menú</Link>
       <ProductArtwork product={product} large />
       <section className="product-detail">
-        <span className="eyebrow">Hecho para vos</span><h1>{product.product_name}</h1><p>{product.product_description}</p>
+        <h1>{product.product_name}</h1><p>{product.product_description}</p>
         <strong className="detail-price">{formatPrice(product.product_price)}</strong>
         <div className="detail-actions">
           <div className="quantity-control" aria-label="Cantidad">
@@ -245,14 +358,17 @@ function ProductDetailPage() {
             <strong>{quantity}</strong>
             <button type="button" onClick={() => setQuantity((current) => Math.min(99, current + 1))}>+</button>
           </div>
-          <button type="button" onClick={addAndContinue}>Agregar · {formatPrice(Number(product.product_price) * quantity)}</button>
+          <div className="detail-submit-actions">
+            <button className="button-link--secondary" type="button" onClick={() => addAndGo("/menu")}>Agregar y seguir</button>
+            <button type="button" onClick={() => addAndGo("/orders#current")}>Agregar y terminar</button>
+          </div>
         </div>
       </section>
     </div></main>
   );
 }
 
-function CartPage() {
+function CurrentOrderSection({ activeOrder }: { activeOrder?: KnownOrder }) {
   const { cart, cartReady, cartCount, cartTotal, setQuantity, removeFromCart, clearCart } = useShop();
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [error, setError] = useState("");
@@ -269,19 +385,36 @@ function CartPage() {
       setIsCheckingOut(false);
     }
   }
-  if (!cartReady) return <main className="page"><p className="loading">Cargando carrito…</p></main>;
+  if (!cartReady) return null;
   return (
-    <main className="page"><div className="shell shell--narrow">
-      <header className="page-header page-header--compact"><span className="eyebrow">Tu selección</span><h1>Carrito</h1>{cartCount > 0 && <p>{cartCount} {cartCount === 1 ? "producto" : "productos"}</p>}</header>
-      {!cart.length ? (
-        <div className="empty-state"><span>＋</span><h2>Tu carrito está vacío</h2><p>Elegí algo rico del menú para empezar.</p><Link className="button-link" to="/menu">Ver menú</Link></div>
+    <section className="orders-section" id="current">
+      <div className="orders-section__heading"><h2>Pedido actual</h2>{cartCount > 0 && <span>{cartCount} {cartCount === 1 ? "producto" : "productos"}</span>}</div>
+      {!cart.length && activeOrder ? (
+        <section className="orders-list"><OrderCard order={activeOrder} /></section>
+      ) : !cart.length ? (
+        <div className="current-order-empty"><p>Todavía no agregaste productos.</p><Link className="button-link button-link--secondary" to="/menu">Ver menú</Link></div>
       ) : <>
+        <section className="cart-summary">
+          <div className="cart-summary__total"><span>Total</span><strong>{formatPrice(cartTotal)}</strong></div>
+          {error && <p className="retry-error" role="alert">{error}</p>}
+          <div className="cart-summary-actions">
+            <Link className="button-link button-link--secondary" to="/menu">Agregar más productos</Link>
+            <button type="button" onClick={() => void checkout()} disabled={isCheckingOut}>{isCheckingOut ? "Abriendo Mercado Pago…" : "Continuar al pago"}</button>
+          </div>
+        </section>
         <section className="cart-list">
           {cart.map((item) => (
             <article className="cart-item" key={item.product_id}>
               <ProductArtwork product={item} />
               <div className="cart-item__content">
-                <div><h2>{item.product_name}</h2><button className="remove-button" type="button" onClick={() => removeFromCart(item.product_id)}>Eliminar</button></div>
+                <div className="cart-item__header">
+                  <h2>{item.product_name}</h2>
+                  <button className="remove-button" type="button" onClick={() => removeFromCart(item.product_id)} aria-label={`Eliminar ${item.product_name}`} title="Eliminar producto">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+                    </svg>
+                  </button>
+                </div>
                 <div className="cart-item__footer">
                   <div className="quantity-control quantity-control--small">
                     <button type="button" onClick={() => setQuantity(item.product_id, item.quantity - 1)}>−</button><strong>{item.quantity}</strong><button type="button" onClick={() => setQuantity(item.product_id, item.quantity + 1)}>+</button>
@@ -292,15 +425,8 @@ function CartPage() {
             </article>
           ))}
         </section>
-        <section className="cart-summary">
-          <div><span>Subtotal</span><strong>{formatPrice(cartTotal)}</strong></div>
-          <div className="cart-summary__total"><span>Total</span><strong>{formatPrice(cartTotal)}</strong></div>
-          <small>El precio y la disponibilidad se confirman antes de abrir Mercado Pago.</small>
-          {error && <p className="retry-error" role="alert">{error}</p>}
-          <button type="button" onClick={() => void checkout()} disabled={isCheckingOut}>{isCheckingOut ? "Abriendo Mercado Pago…" : "Continuar al pago"}</button>
-        </section>
       </>}
-    </div></main>
+    </section>
   );
 }
 
@@ -314,36 +440,177 @@ function orderStatusLabel(status: OrderStatus) {
   return "Pendiente";
 }
 
+function fulfillmentStatusLabel(status: OrderStatus) {
+  if (status.fulfillment_status) return fulfillmentLabels[status.fulfillment_status];
+  return status.status === "paid" ? "Recibido" : "Esperando confirmación del pago";
+}
+
+function OrderCard({ order }: { order: KnownOrder }) {
+  return (
+    <Link className="order-card" to={`/orders/${order.order_id}`}>
+      <div><span>Pedido {shortOrderId(order.order_id)}</span><small>{new Intl.DateTimeFormat("es-AR", { dateStyle: "medium", timeStyle: "short" }).format(order.created_at)}</small></div>
+      {order.last_status ? <div className="order-card__status"><b>{order.last_status.status === "paid" ? fulfillmentStatusLabel(order.last_status) : orderStatusLabel(order.last_status)}</b><strong>{formatPrice(order.last_status.total_amount, order.last_status.currency)}</strong></div> : <span>Sin conexión</span>}
+    </Link>
+  );
+}
+
 function OrdersPage() {
+  const { cart, cartReady } = useShop();
   const [orders, setOrders] = useState<KnownOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeOrdersOpen, setActiveOrdersOpen] = useState(false);
+  const [incompleteOrdersOpen, setIncompleteOrdersOpen] = useState(false);
+  const [previousOrdersOpen, setPreviousOrdersOpen] = useState(false);
+  const loadSequence = useRef(0);
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, []);
   const loadOrders = useCallback(async () => {
-    const legacyOrderId = localStorage.getItem(storedOrderKey);
-    if (legacyOrderId) await rememberOrder(legacyOrderId);
+    const sequence = ++loadSequence.current;
+    setLoading(true);
+    const checkoutOrderId = localStorage.getItem(storedOrderKey);
+    if (checkoutOrderId) await rememberOrder(checkoutOrderId);
     const known = await loadKnownOrders();
     const refreshed = await Promise.all(known.map(async (order) => {
       try {
-        const status = await fetchOrderStatus(order.order_id);
+        let status = await fetchOrderStatus(order.order_id);
+        const returnedFromCheckoutWithoutPayment = (
+          order.order_id === checkoutOrderId
+          && status.payment_attempt_status === null
+          && status.status === "awaiting_payment"
+          && status.payment_status === "created"
+          && status.checkout_state !== "abandoned"
+        );
+        if (returnedFromCheckoutWithoutPayment) status = await abandonOrder(order.order_id);
         await saveOrderStatus(status);
         return { ...order, last_status: status };
       } catch { return order; }
     }));
+    if (sequence !== loadSequence.current) return;
+    const checkoutOrder = refreshed.find((order) => order.order_id === checkoutOrderId);
+    if (
+      checkoutOrder?.last_status
+      && (terminalStatuses.has(checkoutOrder.last_status.status) || checkoutOrder.last_status.checkout_state === "abandoned")
+    ) localStorage.removeItem(storedOrderKey);
     setOrders(refreshed); setLoading(false);
   }, []);
-  useEffect(() => { void loadOrders(); }, [loadOrders]);
+  useEffect(() => {
+    function refreshOrders() {
+      void loadOrders();
+    }
+    function refreshVisibleOrders() {
+      if (document.visibilityState === "visible") refreshOrders();
+    }
+    refreshOrders();
+    window.addEventListener("pageshow", refreshOrders);
+    document.addEventListener("visibilitychange", refreshVisibleOrders);
+    return () => {
+      window.removeEventListener("pageshow", refreshOrders);
+      document.removeEventListener("visibilitychange", refreshVisibleOrders);
+    };
+  }, [loadOrders]);
+  const activeOrders = orders.filter(({ last_status: status }) => (
+    status?.status === "paid"
+    && (!status.fulfillment_status || !completedFulfillmentStatuses.has(status.fulfillment_status))
+  ));
+  const incompleteOrders = orders.filter(({ last_status: status }) => (
+    status?.can_retry
+    && !["cancelled", "expired"].includes(status.status)
+  ));
+  const previousOrders = orders.filter((order) => (
+    !activeOrders.includes(order)
+    && !incompleteOrders.includes(order)
+  ));
+  const currentActiveOrder = cartReady && !cart.length ? activeOrders[0] : undefined;
+  const groupedActiveOrders = currentActiveOrder ? activeOrders.slice(1) : activeOrders;
+  function orderCards(items: KnownOrder[]) {
+    return <section className="orders-list">
+      {items.map((order) => <OrderCard order={order} key={order.order_id} />)}
+    </section>;
+  }
+  if (loading || !cartReady) {
+    return (
+      <main className="page"><div className="shell shell--narrow">
+        <p className="loading orders-page-loading" role="status">Cargando pedidos…</p>
+      </div></main>
+    );
+  }
   return (
     <main className="page"><div className="shell shell--narrow">
-      <header className="page-header page-header--compact"><span className="eyebrow">Este dispositivo</span><h1>Mis pedidos</h1><p>Consultamos el estado real en la tienda cada vez que entrás.</p></header>
-      {loading && <p className="loading">Buscando pedidos…</p>}
-      {!loading && !orders.length && <div className="empty-state"><span>▤</span><h2>Todavía no hay pedidos</h2><p>Los pedidos que hagas desde este dispositivo aparecerán acá.</p><Link className="button-link" to="/menu">Ver menú</Link></div>}
-      <section className="orders-list">
-        {orders.map((order) => (
-          <Link className="order-card" to={`/orders/${order.order_id}`} key={order.order_id}>
-            <div><span>Pedido {shortOrderId(order.order_id)}</span><small>{new Intl.DateTimeFormat("es-AR", { dateStyle: "medium", timeStyle: "short" }).format(order.created_at)}</small></div>
-            {order.last_status ? <div className="order-card__status"><b>{orderStatusLabel(order.last_status)}</b><strong>{formatPrice(order.last_status.total_amount, order.last_status.currency)}</strong></div> : <span>Sin conexión</span>}
-          </Link>
-        ))}
-      </section>
+      <CurrentOrderSection activeOrder={currentActiveOrder} />
+      {groupedActiveOrders.length > 0 && <section className="orders-section order-group">
+        <button
+          className="order-group-toggle"
+          type="button"
+          aria-expanded={activeOrdersOpen}
+          aria-controls="active-orders-list"
+          onClick={() => setActiveOrdersOpen((open) => !open)}
+        >
+          <span>Pedidos en curso</span>
+          <span className="order-group-toggle__meta">
+            <small>{groupedActiveOrders.length}</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+          </span>
+        </button>
+        <div
+          className={`order-group-panel${activeOrdersOpen ? " order-group-panel--open" : ""}`}
+          id="active-orders-list"
+          aria-hidden={!activeOrdersOpen}
+          inert={!activeOrdersOpen}
+        >
+          <div className="order-group-panel__content">{orderCards(groupedActiveOrders)}</div>
+        </div>
+      </section>}
+      {incompleteOrders.length > 0 && <section className="orders-section order-group">
+        <button
+          className="order-group-toggle"
+          type="button"
+          aria-expanded={incompleteOrdersOpen}
+          aria-controls="incomplete-orders-list"
+          onClick={() => setIncompleteOrdersOpen((open) => !open)}
+        >
+          <span>Pedidos incompletos</span>
+          <span className="order-group-toggle__meta">
+            <small>{incompleteOrders.length}</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+          </span>
+        </button>
+        <div
+          className={`order-group-panel${incompleteOrdersOpen ? " order-group-panel--open" : ""}`}
+          id="incomplete-orders-list"
+          aria-hidden={!incompleteOrdersOpen}
+          inert={!incompleteOrdersOpen}
+        >
+          <div className="order-group-panel__content">
+            {orderCards(incompleteOrders)}
+          </div>
+        </div>
+      </section>}
+      {previousOrders.length > 0 && <section className="orders-section order-group">
+        <button
+          className="order-group-toggle"
+          type="button"
+          aria-expanded={previousOrdersOpen}
+          aria-controls="previous-orders-list"
+          onClick={() => setPreviousOrdersOpen((open) => !open)}
+        >
+          <span>Pedidos anteriores</span>
+          <span className="order-group-toggle__meta">
+            <small>{previousOrders.length}</small>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
+          </span>
+        </button>
+        <div
+          className={`order-group-panel${previousOrdersOpen ? " order-group-panel--open" : ""}`}
+          id="previous-orders-list"
+          aria-hidden={!previousOrdersOpen}
+          inert={!previousOrdersOpen}
+        >
+          <div className="order-group-panel__content">
+            {orderCards(previousOrders)}
+          </div>
+        </div>
+      </section>}
     </div></main>
   );
 }
@@ -361,8 +628,10 @@ function OrderDetailPage() {
   }, [orderId]);
   useEffect(() => { void loadStatus(); }, [loadStatus]);
   useEffect(() => {
-    if (!status || terminalStatuses.has(status.status) || status.checkout_state === "abandoned") return;
-    const timer = window.setInterval(() => void loadStatus(), 5000);
+    if (!status || status.checkout_state === "abandoned") return;
+    if (terminalStatuses.has(status.status) && status.status !== "paid") return;
+    if (status.fulfillment_status && completedFulfillmentStatuses.has(status.fulfillment_status)) return;
+    const timer = window.setInterval(() => void loadStatus(), 10000);
     return () => window.clearInterval(timer);
   }, [loadStatus, status]);
   const content = status ? statusContent(status) : null;
@@ -372,7 +641,24 @@ function OrderDetailPage() {
       <section className="result-card result-card--embedded" aria-live="polite">
         {!content && !error && <p className="loading">Actualizando pedido…</p>}
         {error && <div className="notice notice--error">{error}</div>}
-        {content && status && <><div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div><span className="eyebrow">Pedido {shortOrderId(status.order_id)}</span><h1>{content.title}</h1><p>{content.text}</p><strong className="result-amount">{formatPrice(status.total_amount, status.currency)}</strong></>}
+        {content && status && <>
+          <div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div>
+          <span className="eyebrow">Pedido {shortOrderId(status.order_id)}</span>
+          <h1>{content.title}</h1>
+          <p>{content.text}</p>
+          <div className="order-state-list">
+            <div><span>Estado del pago</span><strong>{orderStatusLabel(status)}</strong></div>
+            <div><span>Estado del pedido</span><strong>{fulfillmentStatusLabel(status)}</strong></div>
+          </div>
+          <div className="order-detail-items">
+            <h2>Tu pedido</h2>
+            {status.items.map((item, index) => <div className="order-detail-item" key={item.product_id ?? `${item.product_name}-${index}`}>
+              <div><strong>{item.quantity} × {item.product_name}</strong><small>{formatPrice(item.unit_price, status.currency)} c/u</small></div>
+              <strong>{formatPrice(item.subtotal, status.currency)}</strong>
+            </div>)}
+            <div className="order-detail-total"><span>Total</span><strong>{formatPrice(status.total_amount, status.currency)}</strong></div>
+          </div>
+        </>}
       </section>
     </div></main>
   );
@@ -433,7 +719,7 @@ export default function App() {
         <Route index element={<HomePage />} />
         <Route path="menu" element={<MenuPage />} />
         <Route path="menu/:productId" element={<ProductDetailPage />} />
-        <Route path="cart" element={<CartPage />} />
+        <Route path="cart" element={<Navigate to="/orders#current" replace />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/:orderId" element={<OrderDetailPage />} />
       </Route>

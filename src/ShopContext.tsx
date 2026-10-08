@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { fetchProducts } from "./api";
 import { clearStoredCart, deleteCartItem, loadCart, saveCartItem } from "./storage";
@@ -12,6 +12,8 @@ type ShopContextValue = {
   cartReady: boolean;
   cartCount: number;
   cartTotal: number;
+  cartNotice: string | null;
+  dismissCartNotice: () => void;
   addToCart: (product: Product, quantity?: number) => void;
   setQuantity: (productId: string, quantity: number) => void;
   removeFromCart: (productId: string) => void;
@@ -26,6 +28,8 @@ export function ShopProvider({ children }: { children: ReactNode }) {
   const [productsError, setProductsError] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [cartReady, setCartReady] = useState(false);
+  const [cartNotice, setCartNotice] = useState<string | null>(null);
+  const cartNoticeTimer = useRef<number | null>(null);
 
   useEffect(() => {
     fetchProducts()
@@ -38,7 +42,44 @@ export function ShopProvider({ children }: { children: ReactNode }) {
       .finally(() => setCartReady(true));
   }, []);
 
+  useEffect(() => () => {
+    if (cartNoticeTimer.current !== null) window.clearTimeout(cartNoticeTimer.current);
+  }, []);
+
+  function dismissCartNotice() {
+    if (cartNoticeTimer.current !== null) window.clearTimeout(cartNoticeTimer.current);
+    cartNoticeTimer.current = null;
+    setCartNotice(null);
+  }
+
+  function showCartNotice() {
+    if (cartNoticeTimer.current !== null) window.clearTimeout(cartNoticeTimer.current);
+    setCartNotice("Agregado al pedido");
+    cartNoticeTimer.current = window.setTimeout(() => {
+      cartNoticeTimer.current = null;
+      setCartNotice(null);
+    }, 1500);
+  }
+
+  useEffect(() => {
+    function refreshCartFromStorage() {
+      void loadCart()
+        .then(setCart)
+        .finally(() => setCartReady(true));
+    }
+    function refreshVisibleCart() {
+      if (document.visibilityState === "visible") refreshCartFromStorage();
+    }
+    window.addEventListener("pageshow", refreshCartFromStorage);
+    document.addEventListener("visibilitychange", refreshVisibleCart);
+    return () => {
+      window.removeEventListener("pageshow", refreshCartFromStorage);
+      document.removeEventListener("visibilitychange", refreshVisibleCart);
+    };
+  }, []);
+
   function addToCart(product: Product, quantity = 1) {
+    showCartNotice();
     setCart((current) => {
       const existing = current.find((item) => item.product_id === product.product_id);
       const nextItem: CartItem = {
@@ -86,11 +127,13 @@ export function ShopProvider({ children }: { children: ReactNode }) {
       (total, item) => total + Number(item.product_price) * item.quantity,
       0,
     ),
+    cartNotice,
+    dismissCartNotice,
     addToCart,
     setQuantity,
     removeFromCart,
     clearCart,
-  }), [products, productsLoading, productsError, cart, cartReady]);
+  }), [products, productsLoading, productsError, cart, cartReady, cartNotice]);
 
   return <ShopContext.Provider value={value}>{children}</ShopContext.Provider>;
 }

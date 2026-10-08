@@ -9,9 +9,11 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       VitePWA({
-        // Activate updates after the user closes the app instead of reloading a
-        // payment result screen while it is being viewed.
-        registerType: "prompt",
+        registerType: "autoUpdate",
+        workbox: {
+          clientsClaim: true,
+          skipWaiting: true,
+        },
         manifest: {
           name: env.VITE_APP_NAME || "Fried Chunks",
           short_name: "FriedChunks",
