@@ -16,8 +16,12 @@ Las rutas `/payment/success`, `/payment/failure` y `/payment/pending` procesan e
 regreso desde Mercado Pago. Si el usuario vuelve sin pagar, el checkout se
 muestra como no completado y permanece visible en Mis pedidos.
 
-La imagen final usa Nginx y lee `PORT` al iniciar. Railway puede inyectar su
-puerto dinámico sin ejecutar Node en producción.
+La imagen final usa Nginx y lee `PORT` al iniciar. Las llamadas del navegador a
+`/api` se reenvían mediante `API_UPSTREAM`; esto mantiene la cookie de sesión en
+el mismo dominio de la PWA. En Railway, el valor predeterminado apunta a
+`http://fried-chunks-api.railway.internal:8000` y puede sobrescribirse si cambia
+el nombre del servicio. Railway puede inyectar su puerto dinámico sin ejecutar
+Node en producción.
 
 Para producción local:
 

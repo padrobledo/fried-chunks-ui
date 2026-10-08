@@ -1,6 +1,8 @@
 import type { CartItem, Checkout, OrderStatus, Product } from "./types";
 
-export const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+export const apiUrl = import.meta.env.DEV
+  ? import.meta.env.VITE_API_URL ?? "/api"
+  : "/api";
 
 function apiFetch(path: string, init?: RequestInit) {
   return fetch(`${apiUrl}${path}`, { ...init, credentials: "include" });
