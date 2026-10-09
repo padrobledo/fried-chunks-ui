@@ -15,11 +15,9 @@ import {
 
 import { abandonOrder, cancelOrder, createCartCheckout, fetchOrderStatus, fetchOrderStatuses, retryOrder } from "./api";
 import { ShopProvider, useShop } from "./ShopContext";
-import { loadKnownOrders, rememberOrder, saveOrderStatus } from "./storage";
 import type { FulfillmentStatus, KnownOrder, OrderStatus, Product, ProductCategory } from "./types";
 
 const storedOrderKey = "fried_chunks_order_id";
-const revealIncompleteOrderKey = "fried_chunks_reveal_incomplete_order";
 const menuScrollKey = "fried_chunks_menu_scroll";
 const menuExitEvent = "fried-chunks:menu-exit";
 const menuTransitionMs = 220;
@@ -49,6 +47,66 @@ function usePageReturn(onReturn: () => void) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
+}
+
+function CancelOrderConfirmation({
+  open,
+  error,
+  isCancelling,
+  isRetrying,
+  onClose,
+  onCancel,
+  onFinishPayment,
+}: {
+  open: boolean;
+  error: string;
+  isCancelling: boolean;
+  isRetrying: boolean;
+  onClose: () => void;
+  onCancel: () => void;
+  onFinishPayment: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !isCancelling && !isRetrying) onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [isCancelling, isRetrying, onClose, open]);
+  if (!open) return null;
+  return <div
+    className="confirmation-backdrop"
+    role="presentation"
+    onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !isCancelling && !isRetrying) onClose();
+    }}
+  >
+    <section
+      className="confirmation-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cancel-order-title"
+    >
+      <h2 id="cancel-order-title">¿Querés cancelar este pedido?</h2>
+      <p>Si lo cancelás, no vas a poder retomarlo.</p>
+      {error && <p className="retry-error" role="alert">{error}</p>}
+      <div className="confirmation-modal__actions">
+        <button
+          className="danger-button"
+          type="button"
+          onClick={onCancel}
+          disabled={isCancelling || isRetrying}
+        >{isCancelling ? "Cancelando…" : "Cancelar pedido"}</button>
+        <button
+          type="button"
+          onClick={onFinishPayment}
+          disabled={isCancelling || isRetrying}
+          autoFocus
+        >{isRetrying ? "Abriendo Mercado Pago…" : "Terminar pago"}</button>
+      </div>
+    </section>
+  </div>;
 }
 const fulfillmentLabels: Record<FulfillmentStatus, string> = {
   received: "Recibido",
@@ -164,7 +222,7 @@ function BottomNavigation() {
       <NavLink to="/" end onClick={(event) => changeTab(event, "/")}><span aria-hidden="true">⌂</span>Inicio</NavLink>
       <NavLink to="/menu"><span aria-hidden="true">☰</span>Menú</NavLink>
       <NavLink to="/orders" onClick={(event) => changeTab(event, "/orders")} className={`orders-nav-link${cartNotice ? " orders-nav-link--attention" : ""}`}>
-        <span aria-hidden="true">▤</span>Pedidos{cartCount > 0 && <b>{cartCount}</b>}
+        <span aria-hidden="true">▤</span>Mis pedidos{cartCount > 0 && <b>{cartCount}</b>}
       </NavLink>
     </nav>
   );
@@ -188,15 +246,12 @@ function HomePage() {
   useEffect(() => {
     const orderId = localStorage.getItem(storedOrderKey);
     if (!orderId) return;
-    void rememberOrder(orderId);
     fetchOrderStatus(orderId)
       .then(async (status) => {
-        await saveOrderStatus(status);
         if (status.status === "paid") setReturnMessage("Tu último pago fue acreditado.");
         else if (status.status === "failed") setReturnMessage("Tu último pago fue rechazado. Podés intentarlo nuevamente.");
         else if (["awaiting_payment", "payment_processing"].includes(status.status)) {
           const abandoned = await abandonOrder(orderId);
-          await saveOrderStatus(abandoned);
           setReturnMessage("Volviste sin completar el pago. El pedido quedó guardado.");
         }
         localStorage.removeItem(storedOrderKey);
@@ -395,13 +450,7 @@ function ProductDetailPage() {
   );
 }
 
-function CurrentOrderSection({
-  activeOrder,
-  hasIncompleteOrders,
-}: {
-  activeOrder?: KnownOrder;
-  hasIncompleteOrders: boolean;
-}) {
+function CartCurrentOrderSection() {
   const { cart, cartReady, cartCount, cartTotal, setQuantity, removeFromCart, clearCart } = useShop();
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [error, setError] = useState("");
@@ -409,7 +458,6 @@ function CurrentOrderSection({
     setIsCheckingOut(true); setError("");
     try {
       const result = await createCartCheckout(cart);
-      await rememberOrder(result.order_id);
       localStorage.setItem(storedOrderKey, result.order_id);
       await clearCart({ preserveView: true });
       window.location.assign(result.checkout_url);
@@ -418,28 +466,17 @@ function CurrentOrderSection({
       setIsCheckingOut(false);
     }
   }
-  if (!cartReady) return null;
+  if (!cartReady || !cart.length) return null;
   return (
     <section className="orders-section" id="current">
-      <div className="orders-section__heading"><h2>Pedido actual</h2>{cartCount > 0 && <span>{cartCount} {cartCount === 1 ? "producto" : "productos"}</span>}</div>
-      {!cart.length && activeOrder ? (
-        <section className="orders-list"><OrderCard order={activeOrder} /></section>
-      ) : !cart.length ? (
-        <div className={`current-order-empty${hasIncompleteOrders ? " current-order-empty--with-incomplete" : ""}`}>
-          <p>{hasIncompleteOrders
-            ? "Podés continuar con un pedido incompleto o comenzar un nuevo pedido."
-            : "No agregaste productos."}</p>
-          <Link className="button-link button-link--secondary" to="/menu">
-            Agregar productos
-          </Link>
-        </div>
-      ) : <>
+      <div className="orders-section__heading"><h2>Pedido actual</h2><span>{cartCount} {cartCount === 1 ? "producto" : "productos"}</span></div>
+      <>
         <section className="cart-summary">
           <div className="cart-summary__total"><span>Total</span><strong>{formatPrice(cartTotal)}</strong></div>
           {error && <p className="retry-error" role="alert">{error}</p>}
           <div className="cart-summary-actions">
-            <Link className="button-link button-link--secondary" to="/menu">Agregar más productos</Link>
-            <button type="button" onClick={() => void checkout()} disabled={isCheckingOut}>{isCheckingOut ? "Abriendo Mercado Pago…" : "Terminar y pagar"}</button>
+            <button className="button-link--secondary" type="button" onClick={() => void clearCart()} disabled={isCheckingOut}>Cancelar</button>
+            <button type="button" onClick={() => void checkout()} disabled={isCheckingOut}>{isCheckingOut ? "Abriendo Mercado Pago…" : "Pagar"}</button>
           </div>
         </section>
         <section className="cart-list">
@@ -465,7 +502,7 @@ function CurrentOrderSection({
             </article>
           ))}
         </section>
-      </>}
+      </>
     </section>
   );
 }
@@ -494,6 +531,15 @@ function isIncompleteOrderStatus(status?: OrderStatus) {
   );
 }
 
+function isActiveOrderStatus(status?: OrderStatus) {
+  if (!status || ["cancelled", "expired", "refunded", "partially_refunded", "disputed"].includes(status.status)) return false;
+  if (isIncompleteOrderStatus(status)) return true;
+  if (status.status === "paid") {
+    return !status.fulfillment_status || !completedFulfillmentStatuses.has(status.fulfillment_status);
+  }
+  return ["awaiting_payment", "payment_processing"].includes(status.status);
+}
+
 function OrderCard({ order }: { order: KnownOrder }) {
   return (
     <Link className="order-card" to={`/orders/${order.order_id}`}>
@@ -503,24 +549,16 @@ function OrderCard({ order }: { order: KnownOrder }) {
   );
 }
 
-function OrdersPage() {
-  const { cart, cartReady } = useShop();
+function useKnownOrderStatuses() {
   const [orders, setOrders] = useState<KnownOrder[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeOrdersOpen, setActiveOrdersOpen] = useState(false);
-  const [incompleteOrdersOpen, setIncompleteOrdersOpen] = useState(false);
-  const [previousOrdersOpen, setPreviousOrdersOpen] = useState(false);
+  const [error, setError] = useState("");
   const loadSequence = useRef(0);
-  useLayoutEffect(() => {
-    window.scrollTo({ top: 0, behavior: "auto" });
-  }, []);
   const loadOrders = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoading(true);
     const checkoutOrderId = localStorage.getItem(storedOrderKey);
-    const revealIncompleteOrderId = localStorage.getItem(revealIncompleteOrderKey);
     try {
-      if (checkoutOrderId) await rememberOrder(checkoutOrderId);
       let statuses = await fetchOrderStatuses();
       const checkoutStatusIndex = statuses.findIndex((status) => status.order_id === checkoutOrderId);
       const checkoutStatus = statuses[checkoutStatusIndex];
@@ -535,7 +573,6 @@ function OrdersPage() {
         const abandoned = await abandonOrder(checkoutStatus.order_id);
         statuses = statuses.map((status, index) => index === checkoutStatusIndex ? abandoned : status);
       }
-      await Promise.all(statuses.map(saveOrderStatus));
       const refreshed = statuses
         .map((status) => ({
           order_id: status.order_id,
@@ -545,21 +582,17 @@ function OrdersPage() {
         .sort((left, right) => right.created_at - left.created_at);
       if (sequence !== loadSequence.current) return;
       const checkoutOrder = refreshed.find((order) => order.order_id === checkoutOrderId);
-      const revealIncompleteOrder = refreshed.find(
-        (order) => order.order_id === revealIncompleteOrderId,
-      );
-      if (
-        isIncompleteOrderStatus(checkoutOrder?.last_status)
-        || isIncompleteOrderStatus(revealIncompleteOrder?.last_status)
-      ) setIncompleteOrdersOpen(true);
-      if (revealIncompleteOrder) localStorage.removeItem(revealIncompleteOrderKey);
       if (
         checkoutOrder?.last_status
         && (terminalStatuses.has(checkoutOrder.last_status.status) || checkoutOrder.last_status.checkout_state === "abandoned")
       ) localStorage.removeItem(storedOrderKey);
       setOrders(refreshed);
+      setError("");
     } catch {
-      if (sequence === loadSequence.current) setOrders(await loadKnownOrders());
+      if (sequence === loadSequence.current) {
+        setOrders([]);
+        setError("No pudimos cargar tus pedidos. Intentá nuevamente.");
+      }
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
@@ -579,121 +612,104 @@ function OrdersPage() {
       document.removeEventListener("visibilitychange", refreshVisibleOrders);
     };
   }, [loadOrders]);
-  const activeOrders = orders.filter(({ last_status: status }) => (
-    status?.status === "paid"
-    && (!status.fulfillment_status || !completedFulfillmentStatuses.has(status.fulfillment_status))
-  ));
-  const incompleteOrders = orders.filter(({ last_status: status }) => (
-    isIncompleteOrderStatus(status)
-  ));
-  const previousOrders = orders.filter((order) => (
-    !activeOrders.includes(order)
-    && !incompleteOrders.includes(order)
-  ));
-  const currentActiveOrder = cartReady && !cart.length ? activeOrders[0] : undefined;
-  const groupedActiveOrders = currentActiveOrder ? activeOrders.slice(1) : activeOrders;
-  const shouldOpenIncompleteOrders = Boolean(
-    cartReady
-    && !cart.length
-    && !currentActiveOrder
-    && incompleteOrders.length,
-  );
-  useEffect(() => {
-    if (shouldOpenIncompleteOrders) setIncompleteOrdersOpen(true);
-  }, [shouldOpenIncompleteOrders]);
-  function orderCards(items: KnownOrder[]) {
-    return <section className="orders-list">
-      {items.map((order) => <OrderCard order={order} key={order.order_id} />)}
-    </section>;
+  return { orders, loading, error, reload: loadOrders };
+}
+
+function orderCards(items: KnownOrder[]) {
+  return <section className="orders-list">
+    {items.map((order) => <OrderCard order={order} key={order.order_id} />)}
+  </section>;
+}
+
+function ServerCurrentOrder({ order, onChanged }: { order: KnownOrder; onChanged: () => void }) {
+  const status = order.last_status!;
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [actionError, setActionError] = useState("");
+  async function finishPayment() {
+    setIsRetrying(true); setActionError("");
+    try {
+      const checkout = await retryOrder(order.order_id);
+      localStorage.setItem(storedOrderKey, checkout.order_id);
+      window.location.assign(checkout.checkout_url);
+    } catch {
+      setActionError("No pudimos abrir Mercado Pago. Intentá nuevamente.");
+      setIsRetrying(false);
+    }
   }
+  async function confirmCancellation() {
+    setIsCancelling(true); setActionError("");
+    try {
+      await cancelOrder(order.order_id);
+      if (localStorage.getItem(storedOrderKey) === order.order_id) localStorage.removeItem(storedOrderKey);
+      setCancelModalOpen(false);
+      onChanged();
+    } catch {
+      setActionError("No pudimos cancelar el pedido. Intentá nuevamente.");
+    } finally {
+      setIsCancelling(false);
+    }
+  }
+  return <section className="orders-section" id="current">
+    <div className="orders-section__heading"><h2>Pedido actual</h2><span>Pedido {shortOrderId(order.order_id)}</span></div>
+    <div className="current-server-order">
+      <div className="current-server-order__summary">
+        <div><span>Estado</span><strong>{status.status === "paid" ? fulfillmentStatusLabel(status) : orderStatusLabel(status)}</strong></div>
+        <strong>{formatPrice(status.total_amount, status.currency)}</strong>
+      </div>
+      {actionError && <p className="retry-error" role="alert">{actionError}</p>}
+      <div className="current-server-order__actions">
+        {status.can_retry && <button className="button-link--secondary" type="button" onClick={() => setCancelModalOpen(true)} disabled={isRetrying || isCancelling}>Cancelar</button>}
+        {status.can_retry && <button type="button" onClick={() => void finishPayment()} disabled={isRetrying || isCancelling}>{isRetrying ? "Abriendo Mercado Pago…" : "Completar pago"}</button>}
+        <Link className="button-link button-link--secondary" to={`/orders/${order.order_id}`}>Ver detalle</Link>
+      </div>
+    </div>
+    <CancelOrderConfirmation
+      open={cancelModalOpen}
+      error={actionError}
+      isCancelling={isCancelling}
+      isRetrying={isRetrying}
+      onClose={() => setCancelModalOpen(false)}
+      onCancel={() => void confirmCancellation()}
+      onFinishPayment={() => void finishPayment()}
+    />
+  </section>;
+}
+
+function OrdersPage() {
+  const { cart, cartReady } = useShop();
+  const { orders, loading, error, reload } = useKnownOrderStatuses();
+  const [otherOrdersOpen, setOtherOrdersOpen] = useState(false);
+  const activeOrders = orders.filter(({ last_status }) => isActiveOrderStatus(last_status));
+  const currentOrder = !cart.length ? activeOrders[0] : undefined;
+  const otherOrders = currentOrder ? activeOrders.slice(1) : activeOrders;
+  useLayoutEffect(() => { window.scrollTo({ top: 0, behavior: "auto" }); }, []);
   if (loading || !cartReady) {
-    return (
-      <main className="page"><div className="shell shell--narrow">
-        <p className="loading orders-page-loading" role="status">Cargando pedidos…</p>
-      </div></main>
-    );
+    return <main className="page"><div className="shell shell--narrow">
+      <p className="loading orders-page-loading" role="status">Cargando pedidos…</p>
+    </div></main>;
   }
-  return (
-    <main className="page"><div className="shell shell--narrow">
-      <CurrentOrderSection
-        activeOrder={currentActiveOrder}
-        hasIncompleteOrders={incompleteOrders.length > 0}
-      />
-      {groupedActiveOrders.length > 0 && <section className="orders-section order-group">
-        <button
-          className="order-group-toggle"
-          type="button"
-          aria-expanded={activeOrdersOpen}
-          aria-controls="active-orders-list"
-          onClick={() => setActiveOrdersOpen((open) => !open)}
-        >
-          <span>Pedidos en curso</span>
-          <span className="order-group-toggle__meta">
-            <small>{groupedActiveOrders.length}</small>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
-          </span>
-        </button>
-        <div
-          className={`order-group-panel${activeOrdersOpen ? " order-group-panel--open" : ""}`}
-          id="active-orders-list"
-          aria-hidden={!activeOrdersOpen}
-          inert={!activeOrdersOpen}
-        >
-          <div className="order-group-panel__content">{orderCards(groupedActiveOrders)}</div>
-        </div>
-      </section>}
-      {incompleteOrders.length > 0 && <section className="orders-section order-group">
-        <button
-          className="order-group-toggle"
-          type="button"
-          aria-expanded={incompleteOrdersOpen}
-          aria-controls="incomplete-orders-list"
-          onClick={() => setIncompleteOrdersOpen((open) => !open)}
-        >
-          <span>Pedidos incompletos</span>
-          <span className="order-group-toggle__meta">
-            <small>{incompleteOrders.length}</small>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
-          </span>
-        </button>
-        <div
-          className={`order-group-panel${incompleteOrdersOpen ? " order-group-panel--open" : ""}`}
-          id="incomplete-orders-list"
-          aria-hidden={!incompleteOrdersOpen}
-          inert={!incompleteOrdersOpen}
-        >
-          <div className="order-group-panel__content">
-            {orderCards(incompleteOrders)}
-          </div>
-        </div>
-      </section>}
-      {previousOrders.length > 0 && <section className="orders-section order-group">
-        <button
-          className="order-group-toggle"
-          type="button"
-          aria-expanded={previousOrdersOpen}
-          aria-controls="previous-orders-list"
-          onClick={() => setPreviousOrdersOpen((open) => !open)}
-        >
-          <span>Pedidos anteriores</span>
-          <span className="order-group-toggle__meta">
-            <small>{previousOrders.length}</small>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
-          </span>
-        </button>
-        <div
-          className={`order-group-panel${previousOrdersOpen ? " order-group-panel--open" : ""}`}
-          id="previous-orders-list"
-          aria-hidden={!previousOrdersOpen}
-          inert={!previousOrdersOpen}
-        >
-          <div className="order-group-panel__content">
-            {orderCards(previousOrders)}
-          </div>
-        </div>
-      </section>}
-    </div></main>
-  );
+  return <main className="page"><div className="shell shell--narrow">
+    {cart.length > 0
+      ? <CartCurrentOrderSection />
+      : currentOrder
+        ? <ServerCurrentOrder order={currentOrder} onChanged={() => void reload()} />
+        : <section className="orders-section" id="current">
+          <div className="orders-section__heading"><h2>Pedido actual</h2></div>
+          <div className="current-order-empty"><p>No agregaste productos.</p><Link className="button-link button-link--secondary" to="/menu">Agregar productos</Link></div>
+        </section>}
+    {error && <div className="notice notice--error" role="alert">{error}<button type="button" onClick={() => void reload()}>Reintentar</button></div>}
+    {otherOrders.length > 0 && <section className="orders-section order-group">
+      <button className="order-group-toggle" type="button" aria-expanded={otherOrdersOpen} aria-controls="other-orders-list" onClick={() => setOtherOrdersOpen((open) => !open)}>
+        <span>Otros pedidos en curso</span>
+        <span className="order-group-toggle__meta"><small>{otherOrders.length}</small><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg></span>
+      </button>
+      <div className={`order-group-panel${otherOrdersOpen ? " order-group-panel--open" : ""}`} id="other-orders-list" aria-hidden={!otherOrdersOpen} inert={!otherOrdersOpen}>
+        <div className="order-group-panel__content">{orderCards(otherOrders)}</div>
+      </div>
+    </section>}
+  </div></main>;
 }
 
 function OrderDetailPage() {
@@ -705,21 +721,11 @@ function OrderDetailPage() {
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
   const [cancelError, setCancelError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
-  useEffect(() => {
-    if (!cancelModalOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !isCancelling && !isRetrying) {
-        setCancelModalOpen(false);
-      }
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [cancelModalOpen, isCancelling, isRetrying]);
   const loadStatus = useCallback(async () => {
     if (!orderId) return;
     try {
       const current = await fetchOrderStatus(orderId);
-      await saveOrderStatus(current); setStatus(current); setError("");
+      setStatus(current); setError("");
     } catch { setError("No pudimos actualizar este pedido."); }
   }, [orderId]);
   useEffect(() => { void loadStatus(); }, [loadStatus]);
@@ -743,7 +749,6 @@ function OrderDetailPage() {
     setIsRetrying(true); setRetryError("");
     try {
       const checkout = await retryOrder(status.order_id);
-      await rememberOrder(checkout.order_id);
       localStorage.setItem(storedOrderKey, checkout.order_id);
       window.location.assign(checkout.checkout_url);
     } catch {
@@ -756,9 +761,7 @@ function OrderDetailPage() {
     setIsCancelling(true); setCancelError("");
     try {
       const cancelled = await cancelOrder(status.order_id);
-      await saveOrderStatus(cancelled);
       localStorage.removeItem(storedOrderKey);
-      localStorage.removeItem(revealIncompleteOrderKey);
       setStatus(cancelled);
       setCancelModalOpen(false);
     } catch {
@@ -800,40 +803,15 @@ function OrderDetailPage() {
           </div>
         </>}
       </section>
-      {cancelModalOpen && status?.can_retry && <div
-        className="confirmation-backdrop"
-        role="presentation"
-        onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !isCancelling && !isRetrying) {
-            setCancelModalOpen(false);
-          }
-        }}
-      >
-        <section
-          className="confirmation-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="cancel-order-title"
-        >
-          <h2 id="cancel-order-title">¿Querés cancelar este pedido?</h2>
-          <p>Si lo cancelás, no vas a poder retomarlo.</p>
-          {cancelError && <p className="retry-error" role="alert">{cancelError}</p>}
-          <div className="confirmation-modal__actions">
-            <button
-              className="danger-button"
-              type="button"
-              onClick={() => void confirmCancellation()}
-              disabled={isCancelling || isRetrying}
-            >{isCancelling ? "Cancelando…" : "Cancelar pedido"}</button>
-            <button
-              type="button"
-              onClick={() => void finishPayment()}
-              disabled={isCancelling || isRetrying}
-              autoFocus
-            >{isRetrying ? "Abriendo Mercado Pago…" : "Terminar pago"}</button>
-          </div>
-        </section>
-      </div>}
+      <CancelOrderConfirmation
+        open={cancelModalOpen && Boolean(status?.can_retry)}
+        error={cancelError}
+        isCancelling={isCancelling}
+        isRetrying={isRetrying}
+        onClose={() => setCancelModalOpen(false)}
+        onCancel={() => void confirmCancellation()}
+        onFinishPayment={() => void finishPayment()}
+      />
     </div></main>
   );
 }
@@ -846,16 +824,15 @@ function PaymentResultPage() {
   const [error, setError] = useState("");
   const [retryError, setRetryError] = useState("");
   const [isRetrying, setIsRetrying] = useState(false);
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [cancelError, setCancelError] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
   const loadStatus = useCallback(async () => {
     if (!orderId) { setError("No encontramos el identificador del pedido."); return; }
     try {
-      await rememberOrder(orderId);
       let current = await fetchOrderStatus(orderId);
       if (returnedWithoutPayment(current, returnKind) && current.checkout_state !== "abandoned") current = await abandonOrder(orderId);
-      await saveOrderStatus(current); setError(""); setStatus(current);
-      if (isIncompleteOrderStatus(current)) {
-        localStorage.setItem(revealIncompleteOrderKey, current.order_id);
-      }
+      setError(""); setStatus(current);
       if (terminalStatuses.has(current.status) || current.checkout_state === "abandoned") {
         localStorage.removeItem(storedOrderKey);
       }
@@ -869,6 +846,7 @@ function PaymentResultPage() {
   }, [loadStatus, status]);
   usePageReturn(() => {
     setIsRetrying(false);
+    setCancelModalOpen(false);
     void loadStatus();
   });
   async function retryPayment() {
@@ -876,10 +854,23 @@ function PaymentResultPage() {
     setIsRetrying(true); setRetryError("");
     try {
       const checkout = await retryOrder(orderId);
-      await rememberOrder(checkout.order_id);
       localStorage.setItem(storedOrderKey, checkout.order_id);
       window.location.assign(checkout.checkout_url);
     } catch { setRetryError("No pudimos iniciar un nuevo intento. Volvé a probar en unos segundos."); setIsRetrying(false); }
+  }
+  async function confirmCancellation() {
+    if (!status) return;
+    setIsCancelling(true); setCancelError("");
+    try {
+      const cancelled = await cancelOrder(status.order_id);
+      localStorage.removeItem(storedOrderKey);
+      setStatus(cancelled);
+      setCancelModalOpen(false);
+    } catch {
+      setCancelError("No pudimos cancelar el pedido. Intentá nuevamente.");
+    } finally {
+      setIsCancelling(false);
+    }
   }
   const content = status ? statusContent(status, returnKind) : null;
   const isIncompletePayment = status ? returnedWithoutPayment(status, returnKind) : false;
@@ -887,8 +878,18 @@ function PaymentResultPage() {
     <main className="payment-page"><section className="result-card" aria-live="polite">
       {!content && !error && <p className="loading">Verificando el pago…</p>}
       {error && <><div className="result-icon result-icon--error">!</div><h1>No pudimos verificarlo</h1><p>{error}</p><button type="button" onClick={() => void loadStatus()}>Reintentar</button></>}
-      {!error && content && status && <>{!isIncompletePayment && <div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div>}<span className="eyebrow">Estado del pedido</span><h1 className={isIncompletePayment ? "result-title--compact" : undefined}>{content.title}</h1>{!isIncompletePayment && <p>{content.text}</p>}<strong className="result-amount">{formatPrice(status.total_amount, status.currency)}</strong><small>Pedido {shortOrderId(status.order_id)}</small>{retryError && <p className="retry-error" role="alert">{retryError}</p>}<div className="result-actions">{status.can_retry && <button type="button" onClick={() => void retryPayment()} disabled={isRetrying}>{isRetrying ? "Abriendo Mercado Pago…" : isIncompletePayment ? "Completar el pago" : "Pagar con otra tarjeta"}</button>}<Link className="button-link button-link--secondary" to="/orders">Ver mis pedidos</Link><Link className="text-link" to="/menu">Volver al menú</Link></div></>}
-    </section></main>
+      {!error && content && status && <>{!isIncompletePayment && <div className={`result-icon result-icon--${content.tone}`}>{content.icon}</div>}<span className="eyebrow">Estado del pedido</span><h1 className={isIncompletePayment ? "result-title--compact" : undefined}>{content.title}</h1>{!isIncompletePayment && <p>{content.text}</p>}<strong className="result-amount">{formatPrice(status.total_amount, status.currency)}</strong><small>Pedido {shortOrderId(status.order_id)}</small>{retryError && <p className="retry-error" role="alert">{retryError}</p>}<div className="result-actions">{status.can_retry && <button type="button" onClick={() => void retryPayment()} disabled={isRetrying}>{isRetrying ? "Abriendo Mercado Pago…" : isIncompletePayment ? "Completar el pago" : "Pagar con otra tarjeta"}</button>}<Link className="button-link button-link--secondary" to="/orders">Ver mis pedidos</Link>{status.can_retry && <button className="cancel-order-trigger" type="button" onClick={() => { setCancelError(""); setCancelModalOpen(true); }}>Cancelar pedido</button>}</div></>}
+    </section>
+    <CancelOrderConfirmation
+      open={cancelModalOpen && Boolean(status?.can_retry)}
+      error={cancelError}
+      isCancelling={isCancelling}
+      isRetrying={isRetrying}
+      onClose={() => setCancelModalOpen(false)}
+      onCancel={() => void confirmCancellation()}
+      onFinishPayment={() => void retryPayment()}
+    />
+    </main>
   );
 }
 
@@ -906,6 +907,7 @@ export default function App() {
         <Route path="cart" element={<Navigate to="/orders#current" replace />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/:orderId" element={<OrderDetailPage />} />
+        <Route path="history/*" element={<Navigate to="/orders" replace />} />
       </Route>
       <Route path="payment/:returnKind" element={<PaymentResultPage />} />
       <Route path="*" element={<NotFoundPage />} />
